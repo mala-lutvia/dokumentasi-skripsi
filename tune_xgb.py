@@ -1,5 +1,6 @@
 """
 Tuning Hyperparameter XGBoost Per Kabupaten — Robustness Check
+
 """
 
 import argparse, os, sys, warnings
@@ -23,13 +24,9 @@ SCORING_MAP = {"brier": "neg_brier_score", "roc_auc": "roc_auc", "pr_auc": "aver
 
 XGB_GRID = {
     "n_estimators":  [300, 500, 700],
-    # mengatur berapa banyak skor pohon baru ditambahkan ke prediksi
     "learning_rate": [0.01, 0.05, 0.1],
     "max_depth":     [3, 5, 7],
-    # mengatur seberapa kuat skor daun pohon ditahan agar tidak terlalu besar
-    "reg_lambda":    [0.01, 0.1, 1.0],
-    "colsample_bytree": [0.3, 0.5, 0.7],  
-    "subsample": [0.5, 0.7, 0.9],         
+    "reg_lambda":    [0.01, 0.1, 1.0],        
 }
 
 KODE_MAP = {
@@ -73,9 +70,6 @@ THRESHOLD = 1.5
 def compute_safe_folds(target_folds, min_cls, min_pos_per_fold=MIN_POS_PER_FOLD):
     return max(2, min(target_folds, min_cls // min_pos_per_fold))
 
-# ini tu rasio scale pos weight untuk tiap fold misal fold 1 itu ada 5 miskin 10 tidak brrt 10/5 = 2
-# Secara intuitif, karena kelas miskin lebih sedikit, 
-# model didorong untuk lebih memperhatikan kesalahan pada kelas miskin
 def get_scale_pos_weight(y):
     pos = np.sum(y == 1)
     neg = np.sum(y == 0)
@@ -121,22 +115,20 @@ def ensure_predictors(df):
 
 def make_xgb_for_grid(scale_weight, **grid_params):
     return XGBClassifier(
-        # tugasnya klasifikasi biner dan model menghasilkan probabilitas
         objective        = "binary:logistic",
-        # log loss menilai kualitas probabilitas prediksi, semakin kecil semakin baik
         eval_metric      = "logloss",
-        # memberi bobot lebih besar pada kelas positif pada saat model dilatih. kalau kelas 
-        # miskin lebih sedikit, bobot ini dapat membuat model lebih memperhatikan kesalahan pada kelas tersebut. 
         scale_pos_weight = scale_weight,
-        # memakai metode histogram untuk mencari pemisahan pada pohon. Metode ini mengelompokkan nilai fitur ke dalam bin sehingga pencarian split dapat lebih efisien
         tree_method      = "hist",
         random_state     = RANDOM_STATE,
-        n_jobs           = -1,
+        n_jobs           = 1,
         verbosity        = 0,
         **grid_params,
     )
 
 def _fold_score(y_valid, proba, optimize_metric):
+    """Hitung skor validasi fold sesuai optimize_metric, dengan konvensi
+    'semakin besar semakin baik' (sama seperti SCORING_MAP: neg_brier_score
+    untuk brier, roc_auc untuk roc_auc, average_precision untuk pr_auc)."""
     if optimize_metric == "brier":
         return -brier_score_loss(y_valid, proba)
     elif optimize_metric == "roc_auc":
@@ -147,24 +139,20 @@ def _fold_score(y_valid, proba, optimize_metric):
         raise ValueError(f"optimize_metric tidak dikenal: {optimize_metric}")
 
 def score_one_param_combo(grid_params, X, y, cv_splits, optimize_metric):
-    # menyiapkan tempat untuk menghitung skor tiap putaran CV untuk satu kombinasi hyperparameter 
     fold_scores = []
-    # oof fold
     for train_idx, valid_idx in cv_splits:
-        # memisahkan prediktor dan label untuk bagian data latih
         X_train_fold, X_valid_fold = X[train_idx], X[valid_idx]
         y_train_fold, y_valid_fold = y[train_idx], y[valid_idx]
 
-        # scale_pos_weight fold-wise: dihitung dari y_train_fold
+        # scale_pos_weight fold-wise: dihitung HANYA dari y_train_fold
         scale_weight_fold = get_scale_pos_weight(y_train_fold)
 
         model = make_xgb_for_grid(scale_weight_fold, **grid_params)
-        # model belajar hanya dari bagian latih 
         model.fit(X_train_fold, y_train_fold)
-        # skor probabilitas dibandingkan dengan label asli di fold validasi, menggunakan metrik yang dipilih
+
         proba = model.predict_proba(X_valid_fold)[:, 1]
         fold_scores.append(_fold_score(y_valid_fold, proba, optimize_metric))
-    # nilai rata-rata inilah skor untuk kombinasi hyperparameter tersebut. 
+
     return float(np.mean(fold_scores))
 
 def tune_one_kab(kab, df_kab, optimize_metric):
@@ -190,7 +178,7 @@ def tune_one_kab(kab, df_kab, optimize_metric):
 
     n_splits = compute_safe_folds(TARGET_FOLDS, min_cls)
     scale_weight_global = get_scale_pos_weight(y)
-    # Karena stratified, pembagian fold berusaha menjaga proporsi miskin dan tidak miskin
+
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
     cv_splits = list(cv.split(X, y))
 
